@@ -12,6 +12,8 @@ import pandas as pd
 
 import pandas_gbq as gbq
 
+import gender_guesser.detector as gender
+
 ## Helper Functions
 def parse_contents(contents, filename):
     content_type, content_string = contents.split(',')
@@ -24,7 +26,7 @@ def parse_contents(contents, filename):
         try:
             # Assume that the user uploaded a CSV file
             raw_df = pd.read_csv(
-                io.StringIO(decoded.decode('utf-16')), sep=',')
+                io.StringIO(decoded.decode('utf-8')), sep=',')
 
         except:
             # Assume that the user uploaded a CSV file
@@ -39,10 +41,10 @@ def parse_contents(contents, filename):
 def append_cameo(df, post_col):
 
     # now make a clean postcode col
-    df['postcode_merge'] = df[post_col].map(lambda x: x.replace(' ', '') if pd.notna(x) else x)
+    df['postcode_merge'] = df[post_col].map(lambda x: str(x).replace(' ', '') if pd.notna(x) else x).fillna('')
 
     # get unique postcodes
-    nec_postcodes = tuple(df['postcode_merge'].unique())
+    nec_postcodes = tuple(df.loc[df.postcode_merge.str.contains(r'[A-Z]+\d+[A-Z]+'),'postcode_merge'].dropna().unique())
 
     # Load table
     sql_script = '''
@@ -75,6 +77,33 @@ def append_cameo(df, post_col):
 
     return output_table
 
+# Tagger function
+def cameo_tagger(cam):
+
+    # conditions
+    if pd.isna(cam):
+
+        return 'No Segment'
+
+    elif cam in ['01D', '01E', '02B', '02C', '02D', '03B']:
+
+        return 'Stars'
+
+    elif cam in ['01A', '01B', '01C', '02A', '04A', '04B', '05A', '05B']:
+
+        return 'Rising Stars'
+
+    elif cam in ['03A', '05C', '05D', '05E', '06A', '06B', '06C', '07C','07D']:
+
+        return 'Troupes'
+
+    elif cam in ['03C', '03D', '03E', '03F', '04C', '04D', '04F', '04G', '06D','06E']:
+
+        return 'Legends'
+
+    else:
+        return 'No Segment'
+
 HT_logo = 'https://media.glassdoor.com/sqll/2541714/human-theory-squarelogo-1554715634927.png'
 
 
@@ -82,6 +111,7 @@ HT_logo = 'https://media.glassdoor.com/sqll/2541714/human-theory-squarelogo-1554
 dash_app = Dash(__name__, external_stylesheets=[dbc.themes.SUPERHERO], suppress_callback_exceptions=True)
 dash_app.config['suppress_callback_exceptions'] = True
 app = dash_app.server
+
 
 # Notifications
 stopword_notification = dbc.Button("No Stopwords Uploaded", id='stopword-notification', color = "warning",
@@ -161,14 +191,37 @@ control_upload = dbc.Jumbotron(
 
             3. Select the column which has the Postcode information.\n
 
-            4. Select whether you want CSV or Excel output.\n
+            4. If Gender Imputation is required, click the switch. \n
 
-            5. Download Enriched Table
+            5. Then select the column with first name information in it. \n
+
+            6. Select whether you want CSV or Excel output.\n
+
+            7. Download Enriched Table
             '''
         ),
 
     ],
 
+)
+
+gender_switches = html.Div(
+    [
+        dbc.Label("Impute Gender"),
+        dbc.Checklist(
+            options=[
+                {"label": "Enable Gender Imputation", "value": 1},
+
+            ],
+            value=[],
+            id="gender-enable",
+            switch=True,
+        ),
+        dcc.Dropdown(placeholder="Select a name column",
+                    disabled=True,
+                    id="gender-dropdown")
+    ],
+    style = {'display': 'inline-block', 'margin-left' : '20px', 'margin' : '10px'}
 )
 
 upload_area = html.Div([
@@ -205,9 +258,28 @@ upload_area = html.Div([
         'fontWeight': 'bold'
     },
     style_cell={'textAlign': 'left'},
-    column_selectable="single",page_size=10, selected_columns=[]),
+    column_selectable="single",page_size=10, selected_columns=[],
+                        style_table={'overflowX': 'auto'}),
     html.Br(),
-    html.H4("No Column selected", style = {'margin' : '10px'}, id='postcode-select-col'),
+    html.H4("No Column selected", id='postcode-select-col'),
+    html.Br(),
+    html.H4("Impute Gender"),
+    html.Br(),
+    dbc.Checklist(
+            options=[
+                {"label": "Enable Gender Imputation", "value": 1},
+
+            ],
+            value=[],
+            id="gender-enable",
+            switch=True,
+        ),
+
+    html.Br(),
+    dcc.Dropdown(placeholder="Select a name column",
+                    disabled=True,
+                    id="gender-dropdown", style={
+            'width': '50%'}),
     html.Br(),
     dbc.RadioItems(
             options=[
@@ -238,24 +310,25 @@ body_upload = dbc.Container([
         ),
 ], style={"height": "100vh"}, fluid=True)
 
-app.layout = html.Div([navbar,  storage_data,body_upload])
+dash_app.layout = html.Div([navbar,body_upload])
 
 
 
 
 
 
-@app.callback(Output('datatable-upload-container', 'data'),
+@dash_app.callback(Output('datatable-upload-container', 'data'),
               Output('datatable-upload-container', 'columns'),
+              Output('gender-dropdown', 'options'),
               Input('upload-data', 'contents'),
               State('upload-data', 'filename'))
 def update_output(contents, filename):
     if contents is None:
-        return [{}], []
+        return [{}], [], []
     df = parse_contents(contents, filename)
-    return df.to_dict('records'), [{"name": i, "id": i,  "selectable": True} for i in df.columns]
+    return df.to_dict('records'), [{"name": i, "id": i,  "selectable": True} for i in df.columns], list(df.columns)
 
-@app.callback(
+@dash_app.callback(
     Output('postcode-select-col', 'children'),
     Input('datatable-upload-container', 'selected_columns')
 )
@@ -268,24 +341,45 @@ def column_select(selected_columns):
     sel_cool = [i for i in selected_columns][0]
     return "Selected Column is: {}".format(sel_cool)
 
-@app.callback(
+@dash_app.callback(
+Output('gender-dropdown', 'disabled'),
+Input("gender-enable", "value"))
+def enable_gender(val):
+
+    if len(val) >= 1:
+        return False
+    return True
+
+@dash_app.callback(
 Output("download-csv-btn", "disabled"),
-Input('datatable-upload-container', 'selected_columns'))
-def send_warning(sel_columns):
+Input('datatable-upload-container', 'selected_columns'),
+Input('gender-dropdown', 'disabled'),
+Input('gender-dropdown', 'value'))
+def enable_download(sel_columns, gen_enable, name_val):
 
-    if sel_columns == []:
-        return True
-    return False
+    if gen_enable == True:
 
-@app.callback(
+        if sel_columns == []:
+            return True
+        return False
+    else:
+
+        if name_val is None:
+            return True
+        else:
+            return False
+
+@dash_app.callback(
 Output("download-dataframe-csv", "data"),
 Output("token-notification", "children"),
 Input("download-csv-btn", "n_clicks"),
 State('datatable-upload-container', 'data'),
 State('datatable-upload-container', 'selected_columns'),
 State('upload-data', 'filename'),
-State('output-select', 'value'))
-def execute_download(click,df_data, sel_columns, filename, output_type):
+State('output-select', 'value'),
+State("gender-enable", "value"),
+State('gender-dropdown', 'value'))
+def execute_download(click,df_data, sel_columns, filename, output_type, gen_enable, name_col):
 
     if sel_columns == []:
         raise PreventUpdate
@@ -296,6 +390,17 @@ def execute_download(click,df_data, sel_columns, filename, output_type):
 
     # Add data
     output_table = append_cameo(copy_table, post_col)
+
+    # Add Theatre column
+    output_table['theatre_segment'] = output_table.uk_cam.map(cameo_tagger)
+
+    # Now check for gender enable
+    if (len(gen_enable) >= 1) and (name_col is not None):
+
+        det = gender.Detector()
+
+        output_table['imputed_gender'] = output_table[name_col].map(lambda x: 'Female' if 'female' in det.get_gender(x) else
+                                                       'Male' if 'male' in det.get_gender(x) else det.get_gender(x))
 
     if output_type == 1:
 
